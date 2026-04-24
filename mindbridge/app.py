@@ -98,13 +98,13 @@ def format_mood_history() -> str:
     return "\n".join(lines)
 
 
-def log_mood(score: int, note: str) -> tuple[str, str]:
+def log_mood(score: int, note: str) -> tuple[str, str, str]:
     """Persist a mood check-in and return updated UI values."""
     try:
         mood_tracker.log_mood(score, note)
-        return format_mood_history(), "Mood saved."
+        return format_mood_history(), "Mood saved.", ""
     except RuntimeError:
-        return format_mood_history(), "Could not save mood right now."
+        return format_mood_history(), "Could not save mood right now.", note
 
 
 def save_journal_entry(entry_text: str) -> tuple[str, str]:
@@ -131,6 +131,9 @@ def add_exercise_to_chat(
     selected_name: str, chat_history: list[ChatMessage]
 ) -> list[ChatMessage]:
     """Add selected exercise details as an assistant message in chat."""
+    if not selected_name or selected_name.strip() == "":
+        return chat_history
+
     exercise = get_exercise(selected_name)
     if not exercise:
         chat_history.append(
@@ -174,9 +177,9 @@ def send_message(
     yield "", chat_history, llm_messages
 
     try:
-        reply = client.chat(llm_messages)
+        reply, elapsed = client.chat(llm_messages)
         final_reply = (
-            reply
+            f"{reply}\n\n_Replied in {elapsed}s on CPU via Gemma 4_"
             if reply
             else "I'm having trouble thinking right now. Please try again in a moment."
         )
@@ -190,6 +193,24 @@ def send_message(
     yield "", chat_history, llm_messages
 
 
+def check_for_crisis(chat_history: list[ChatMessage]) -> dict[str, object]:
+    """Show a crisis support banner when the latest assistant response includes iCall."""
+    if not chat_history:
+        return gr.update(visible=False)
+
+    last = chat_history[-1]
+    content = str(last.get("content", "")).lower()
+    if "9152987821" in content or "icall" in content:
+        return gr.update(
+            value=(
+                "🆘 If you are in crisis, please call iCall now: **9152987821** "
+                "(Mon-Sat, 8am-10pm). You are not alone."
+            ),
+            visible=True,
+        )
+    return gr.update(visible=False)
+
+
 def build_demo() -> gr.Blocks:
     """Build and return the MindBridge Gradio app."""
     ensure_journal_store()
@@ -201,12 +222,52 @@ def build_demo() -> gr.Blocks:
         print("⚠️ Could not connect to Ollama. Is it running?")
 
     startup_status = "" if available else OLLAMA_ERROR_MESSAGE
+    welcome_message: ChatMessage = {
+        "role": "assistant",
+        "content": (
+            "Hi! I'm MindBridge, your private mental health companion. "
+            "This is a safe space - everything you share stays on your device "
+            "and is never sent anywhere. How are you feeling today?"
+        ),
+    }
 
     with gr.Blocks(title="MindBridge") as demo:
         gr.Markdown("# 🧠 MindBridge")
         gr.Markdown("Your private mental health companion")
+        gr.Markdown(
+            "`Gemma 4 E4B via Ollama` - 100% offline · No data leaves your device"
+        )
 
         startup_notice = gr.Markdown(startup_status)
+        crisis_banner = gr.Markdown("", visible=False)
+
+        chat_state = gr.State(value=[welcome_message])
+        llm_state = gr.State(value=[{"role": "system", "content": SYSTEM_PROMPT}])
+
+        chatbot = gr.Chatbot(
+            label="MindBridge Chat",
+            height=500,
+            value=[welcome_message],
+            type="messages",
+        )
+
+        gr.Markdown("**Quick prompts:**")
+        with gr.Row():
+            btn_anxious = gr.Button("😰 I'm feeling anxious", size="sm")
+            btn_stressed = gr.Button("😤 I'm stressed", size="sm")
+            btn_lonely = gr.Button("😔 I feel lonely", size="sm")
+            btn_sleep = gr.Button("😴 I can't sleep", size="sm")
+
+        def send_quick(
+            msg: str, chat_history: list[ChatMessage], llm_messages: list[ChatMessage]
+        ) -> Generator[tuple[str, list[ChatMessage], list[ChatMessage]], None, None]:
+            return send_message(msg, chat_history, llm_messages)
+
+        with gr.Row():
+            user_input = gr.Textbox(
+                label="Message", placeholder="Share what you are feeling...", scale=8
+            )
+            send_button = gr.Button("Send", variant="primary", scale=1)
 
         with gr.Row():
             mood_slider = gr.Slider(
@@ -220,31 +281,21 @@ def build_demo() -> gr.Blocks:
                 label="Optional mood note", placeholder="What is on your mind?"
             )
             mood_button = gr.Button("Log Mood", variant="secondary")
-
-        mood_history = gr.Textbox(
-            label="My Mood History",
-            value=format_mood_history(),
-            lines=8,
-            interactive=False,
-        )
         mood_status = gr.Markdown("")
-
-        chat_state = gr.State(value=[])
-        llm_state = gr.State(value=[{"role": "system", "content": SYSTEM_PROMPT}])
-
-        chatbot = gr.Chatbot(label="MindBridge Chat", height=420)
-
-        with gr.Row():
-            user_input = gr.Textbox(
-                label="Message", placeholder="Share what you are feeling...", scale=8
-            )
-            send_button = gr.Button("Send", variant="primary", scale=1)
 
         with gr.Accordion("Coping Exercises", open=False):
             exercise_dropdown = gr.Dropdown(
                 choices=list_exercises(), label="Choose an exercise"
             )
             exercise_button = gr.Button("Load Exercise")
+
+        with gr.Accordion("My Mood History", open=False):
+            mood_history = gr.Textbox(
+                label="Last 7 entries",
+                value=format_mood_history(),
+                lines=8,
+                interactive=False,
+            )
 
         with gr.Accordion("Journal", open=False):
             journal_box = gr.Textbox(label="Write a private journal entry", lines=6)
@@ -258,7 +309,7 @@ def build_demo() -> gr.Blocks:
         mood_button.click(
             fn=log_mood,
             inputs=[mood_slider, mood_note],
-            outputs=[mood_history, mood_status],
+            outputs=[mood_history, mood_status, mood_note],
         )
 
         exercise_button.click(
@@ -277,6 +328,9 @@ def build_demo() -> gr.Blocks:
             outputs=[user_input, chat_state, llm_state],
         )
         send_event.then(fn=passthrough_history, inputs=[chat_state], outputs=[chatbot])
+        send_event.then(
+            fn=check_for_crisis, inputs=[chat_state], outputs=[crisis_banner]
+        )
 
         submit_event = user_input.submit(
             fn=send_message,
@@ -285,6 +339,71 @@ def build_demo() -> gr.Blocks:
         )
         submit_event.then(
             fn=passthrough_history, inputs=[chat_state], outputs=[chatbot]
+        )
+        submit_event.then(
+            fn=check_for_crisis, inputs=[chat_state], outputs=[crisis_banner]
+        )
+
+        anxious_event = btn_anxious.click(
+            fn=send_message,
+            inputs=[
+                gr.State(value="I'm feeling anxious and don't know why."),
+                chat_state,
+                llm_state,
+            ],
+            outputs=[user_input, chat_state, llm_state],
+        )
+        anxious_event.then(
+            fn=passthrough_history, inputs=[chat_state], outputs=[chatbot]
+        )
+        anxious_event.then(
+            fn=check_for_crisis, inputs=[chat_state], outputs=[crisis_banner]
+        )
+
+        stressed_event = btn_stressed.click(
+            fn=send_message,
+            inputs=[
+                gr.State(value="I'm really stressed right now."),
+                chat_state,
+                llm_state,
+            ],
+            outputs=[user_input, chat_state, llm_state],
+        )
+        stressed_event.then(
+            fn=passthrough_history, inputs=[chat_state], outputs=[chatbot]
+        )
+        stressed_event.then(
+            fn=check_for_crisis, inputs=[chat_state], outputs=[crisis_banner]
+        )
+
+        lonely_event = btn_lonely.click(
+            fn=send_message,
+            inputs=[
+                gr.State(value="I feel lonely and isolated."),
+                chat_state,
+                llm_state,
+            ],
+            outputs=[user_input, chat_state, llm_state],
+        )
+        lonely_event.then(
+            fn=passthrough_history, inputs=[chat_state], outputs=[chatbot]
+        )
+        lonely_event.then(
+            fn=check_for_crisis, inputs=[chat_state], outputs=[crisis_banner]
+        )
+
+        sleep_event = btn_sleep.click(
+            fn=send_message,
+            inputs=[
+                gr.State(value="I can't sleep and it's affecting everything."),
+                chat_state,
+                llm_state,
+            ],
+            outputs=[user_input, chat_state, llm_state],
+        )
+        sleep_event.then(fn=passthrough_history, inputs=[chat_state], outputs=[chatbot])
+        sleep_event.then(
+            fn=check_for_crisis, inputs=[chat_state], outputs=[crisis_banner]
         )
 
         journal_button.click(
