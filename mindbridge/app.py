@@ -248,7 +248,6 @@ def build_demo() -> gr.Blocks:
             label="MindBridge Chat",
             height=500,
             value=[welcome_message],
-            type="messages",
         )
 
         gr.Markdown("**Quick prompts:**")
