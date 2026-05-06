@@ -107,8 +107,6 @@ Open your browser at: **http://127.0.0.1:7860**
 MindBridge/
 ├── README.md
 ├── LICENSE
-├── prompts.txt
-├── prompts2.txt
 └── mindbridge/
     ├── app.py              # Gradio UI and event wiring
     ├── exercises.py        # Coping exercise catalog
